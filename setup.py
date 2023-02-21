@@ -14,7 +14,6 @@ setup(name='fortnox-client',
         "pymongo==4.3.3",
         "fire==0.4.0",
         "requests==2.26.0",
-        "python-dotenv==0.19.1",
         "ratelimit==2.2.1"
       ],
       zip_safe=False

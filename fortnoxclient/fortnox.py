@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from urllib import parse
 import json
 
-from dotenv import load_dotenv
 from pymongo.uri_parser import parse_uri, split_hosts
 from ratelimit import limits, sleep_and_retry
 import fire
@@ -19,7 +18,6 @@ FORTNOX_TOKEN_EXPIRES_IN__SECONDS = 3600
 FORTNOX_MAX_CALLS_PER_MINUTE = 240
 ONE_MINUTE_IN_SECONDS = 60
 
-load_dotenv()
 
 class FortnoxPayload:
     """
@@ -59,20 +57,17 @@ class Client:
     """
 
     def __init__(
-        self, access_token=None, client_secret=None, request_timeout_in_seconds=60, db_connection_string=None
+        self, db_connection_string, access_token=None, client_secret=None, request_timeout_in_seconds=60
     ):
         self.access_token = access_token
         self.client_secret = client_secret
         self.request_timeout = request_timeout_in_seconds
 
         if db_connection_string is None:
-            if "DB_CONNECTION_STRING" in os.environ:
-                db_connection_string = os.environ["DB_CONNECTION_STRING"]
-            else:
-                raise ValueError("DB_CONNECTION_STRING was not provided and is not defined in the environment variables.")
+            raise ValueError("Required param 'db_connection_string' was not provided .")
 
         if not db_connection_string.strip():
-            raise ValueError("DB_CONNECTION_STRING is defined, but it is empty or whitespace only.")
+            raise ValueError("Required param 'db_connection_string' is defined, but it is empty or whitespace only.")
 
         # Parse the MongoDB URI and remove the database name
         parsed_uri = parse_uri(db_connection_string)
@@ -311,8 +306,7 @@ class Client:
 if __name__ == "__main__":
     fire.Fire(Client)
     # Usage:
-    # from fortnox import Client()
-    api = Client()
-
-    print(str(api.invoices(params=dict(limit=10, page=1, sortorder="descending"))))
-    print(str(api.accounts(account_number=1000)))
+    #   from fortnox import Client()
+    #   api = Client(os.environ['DB_CONNECTION_STRING'])
+    #   print(str(api.invoices(params=dict(limit=10, page=1, sortorder="descending"))))
+    #   print(str(api.accounts(account_number=1000)))

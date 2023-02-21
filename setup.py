@@ -9,12 +9,13 @@ setup(name='fortnox-client',
       author_email='git@joaqim.xyz',
       license='MIT',
       packages=['fortnoxclient'],
-      python_requires="~=3.1",
+      python_requires="~=3.10.9",
       install_requires=[
         "pymongo==4.3.3",
         "fire==0.4.0",
         "requests==2.26.0",
-        "python-dotenv==0.19.1"
+        "python-dotenv==0.19.1",
+        "ratelimit==2.2.1"
       ],
       zip_safe=False
       )

@@ -120,6 +120,11 @@ class Client:
                             response.raise_for_status()
                             print(response.content)
                             raise Exception
+                    case "POST":
+                        if status_code != 201:
+                            response.raise_for_status()
+                            print(response.content)
+                            raise Exception
                     case "DELETE":
                         if status_code != 204:
                             response.raise_for_status()

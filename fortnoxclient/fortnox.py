@@ -1,12 +1,11 @@
 #!/usr/bin/env python
-import os
 import base64
 from typing import Dict
 from datetime import datetime, timedelta
 from urllib import parse
 import json
 
-from pymongo.uri_parser import parse_uri, split_hosts
+from pymongo.uri_parser import parse_uri
 from ratelimit import limits, sleep_and_retry
 import fire
 import requests
@@ -86,8 +85,8 @@ class Client:
         if not 'credentials' in self.database.list_collection_names():
             raise ConnectionError("The 'credentials' collection could not be found in the database.")
 
-    # @sleep_and_retry
-    # @limits(calls=FORTNOX_MAX_CALLS_PER_MINUTE, period=ONE_MINUTE_IN_SECONDS)
+    @sleep_and_retry
+    @limits(calls=FORTNOX_MAX_CALLS_PER_MINUTE, period=ONE_MINUTE_IN_SECONDS)
     def __request(
         self,
         url,
@@ -118,16 +117,17 @@ class Client:
                     case "GET":
                         if status_code != 200:
                             response.raise_for_status()
-                            print(response.content)
-                            raise Exception
+                    case "POST":
+                        if status_code != 201:
+                            response.raise_for_status()
                     case "DELETE":
                         if status_code != 204:
                             response.raise_for_status()
-                            print(response.content)
-                            raise Exception
             except Exception as exc:
+                print(response.content)
+
                 raise Exception(
-                    f"Failed to {method} from url: {url}, received unexpected status code: {status_code}"
+                    f"Failed to {method} @ {url}, received unexpected status code: {status_code}"
                 ) from exc
 
         return response
@@ -151,6 +151,53 @@ class Client:
         )
         return self.__request(url, "GET", params=params).json()
 
+    def __post_resources(
+        self, resource, data, resource_number=None, voucher_series=None, params=None
+    ):
+        """
+        :return: JSON Payload of the created resource(s)
+        """
+        voucher_identifier = None
+
+        def xstr(str_or_null):
+            return str_or_null or ""
+
+        if resource == "vouchers":
+            if not voucher_series[0].isalpha() or not voucher_series[0].isupper():
+                raise ValueError("Invalid Series for voucher resource")
+            voucher_identifier = f"{voucher_series}/{xstr(resource_number)}"
+        url = (
+            FORTNOX_API_URL + resource + f"/{xstr(resource_number)}"
+            if not voucher_identifier
+            else FORTNOX_API_URL + voucher_identifier
+        )
+        return self.__request(url, "POST",data=data, params=params).json()
+
+    def __delete_resource(
+        self, resource, resource_number
+    ):
+        """
+        Delete a Fortnox document
+        :returns: 204 - No Content ( Empty Body ) on success
+                  and Fortnox Error object on failure
+        """
+        url = (
+            FORTNOX_API_URL + resource + f"/{resource_number}"
+        )
+        return self.__request(url, "DELETE")
+
+
+    # TODO: params: https://developer.fortnox.se/documentation/resources/financial-years/
+    def financialyears(self, financialyear_id=None, params=None):
+        """
+        :return: JSON Payload containing requested financial year(s)
+        :rtype: Dict
+        """
+        return self.__fetch_resources(
+            "financialyears", resource_number=financialyear_id, params=params
+        )
+
+
     def accounts(self, account_number=None, params=None):
         """
         :return: JSON Payload containing requested account(s)
@@ -159,6 +206,38 @@ class Client:
         return self.__fetch_resources(
             "accounts", resource_number=account_number, params=params
         )
+
+    def create_article(self, article_number, description,):
+        """
+        Create and upload a new article.
+        """
+        article = dict(Article=(dict(ArticleNumber=article_number, Description=description)))
+        return self.upload_article(article)
+
+
+    def upload_article(self, article):
+        """
+        Upload a new article.
+        """
+        return self.__post_resources("articles", data=json.dumps(article))
+
+    def upload_customer(self, customer):
+        """
+        Upload a new customer.
+        """
+        return self.__post_resources("customers", data=json.dumps(customer))
+
+    def delete_customer(self, customer_number):
+        """
+        Delete a customer.
+        """
+        return self.__delete_resource("customers", resource_number=customer_number)
+
+    def upload_invoice(self, invoice):
+        """
+        Upload a new invoice.
+        """
+        return self.__post_resources("invoices", data=json.dumps(invoice))
 
     def invoices(self, invoice_number=None, params=None):
         """
@@ -174,6 +253,9 @@ class Client:
         )
 
     def bookkeep_invoice(self, invoice_number):
+        """
+        Bookkeep an invoice.
+        """
         if not isinstance(invoice_number, int):
             raise ValueError
         return self.__request(
@@ -306,7 +388,7 @@ class Client:
 if __name__ == "__main__":
     fire.Fire(Client)
     # Usage:
-    #   from fortnox import Client()
+    #   from fortnox import Client
     #   api = Client(os.environ['DB_CONNECTION_STRING'])
     #   print(str(api.invoices(params=dict(limit=10, page=1, sortorder="descending"))))
     #   print(str(api.accounts(account_number=1000)))

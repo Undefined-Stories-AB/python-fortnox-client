@@ -100,6 +100,7 @@ class Client:
             access_token = self.__get_access_token()
         if params:
             url += f"?{parse.urlencode(params)}"
+        # TODO: Make sure the data is in a FortnoxPayload, i.e. { 'Invoice': {...} }
         response = requests.request(
             method,
             url,

@@ -173,6 +173,19 @@ class Client:
         )
         return self.__request(url, "POST",data=data, params=params).json()
 
+    def __put_resources(
+        self, resource, data, resource_number
+    ):
+        """
+        :return: JSON Payload of the updated resource(s)
+        """
+        if resource_number is None or resource_number == "":
+            raise ValueError("Required param 'resource_number' was not provided.")
+        url = FORTNOX_API_URL + resource + f"/{resource_number}"
+        return self.__request(url, "PUT",data=data).json()
+
+
+
     def __delete_resource(
         self, resource, resource_number
     ):
@@ -238,6 +251,12 @@ class Client:
         Upload a new invoice.
         """
         return self.__post_resources("invoices", data=json.dumps(invoice))
+
+    def update_invoice(self, invoice_number, invoice):
+        """
+        Update an existing invoice.
+        """
+        return self.__put_resources("invoices",data=json.dumps(invoice), resource_number=invoice_number)
 
     def invoices(self, invoice_number=None, params=None):
         """

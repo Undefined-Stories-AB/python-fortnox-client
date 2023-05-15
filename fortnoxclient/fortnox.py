@@ -1,21 +1,30 @@
 #!/usr/bin/env python
+from enum import Enum
 import base64
 from typing import Dict
 from datetime import datetime, timedelta
 from urllib import parse
 import json
 
+from pymongo import MongoClient, database
 from pymongo.uri_parser import parse_uri
 from ratelimit import limits, sleep_and_retry
 import fire
 import requests
-from pymongo import MongoClient
+from requests import Response, HTTPError
 
 FORTNOX_API_URL = "https://api.fortnox.se/3/"
 FORTNOX_TOKEN_ENDPOINT = "https://apps.fortnox.se/oauth-v1/token"
 FORTNOX_TOKEN_EXPIRES_IN__SECONDS = 3600
-FORTNOX_MAX_CALLS_PER_MINUTE = 240
-ONE_MINUTE_IN_SECONDS = 60
+
+# 2023-04-19: Add Margin since we get too many 429 while uploading stripe invoice payments
+FORTNOX_MAX_REQUESTS_PER_PERIOD = 5
+FORTNOX_INTERVAL_OF_MAX_REQUESTS_IN_SECONDS = 60
+
+class FortnoxResourceEnum(Enum):
+    VOUCHERS = "vouchers"
+    VOUCHERS_PLURAL = "vouchers"
+    VOUCHERS_SINGULAR = "vouchers"
 
 
 class FortnoxPayload:
@@ -23,23 +32,24 @@ class FortnoxPayload:
     Class for holding Fortnox payload returned from API
     """
 
-    def __init__(self, resource, payload: Dict, pluralize=False):
+    def __init__(self, resource: FortnoxResourceEnum, payload):
         self.resource = resource
         self.resource_name = resource.title()
         self.data = payload[self.resource_name]
 
+class FortnoxParamSortEnum(Enum):
+    ASCENDING = "ascending"
+    DESCENDING = "descending"
 
 class ResourceParams:
     """
     Class for holding resource parameters.
     """
 
-    def __init__(self, limit=10, page=1, sortorder="ascending"):
+    def __init__(self, limit: int =10, page : int=1, sortorder : FortnoxParamSortEnum = FortnoxParamSortEnum.ASCENDING):
         """
         Initialize the resource parameters with default limit 10, page 1, and sortorder "ascending".
         """
-        if sortorder != "ascending" and sortorder != "descending":
-            raise ValueError("Invalid param for 'ResourceParams': 'sortorder'")
         self.limit = limit
         self.page = page
         self.sortorder = sortorder
@@ -54,16 +64,14 @@ class Client:
         invoicespayments(invoice_number=None, params: ResourceParams = None)
         vouchers(voucher_series, voucher_number=None, params: ResourceParams = None)
     """
+    db_client: MongoClient
+    _database: database.Database
 
     def __init__(
-        self, db_connection_string, access_token=None, client_secret=None, request_timeout_in_seconds=60
-    ):
+        self, db_connection_string: str, access_token: str | None=None, client_secret: str | None=None, request_timeout_in_seconds: int =30):
         self.access_token = access_token
         self.client_secret = client_secret
         self.request_timeout = request_timeout_in_seconds
-
-        if db_connection_string is None:
-            raise ValueError("Required param 'db_connection_string' was not provided .")
 
         if not db_connection_string.strip():
             raise ValueError("Required param 'db_connection_string' is defined, but it is empty or whitespace only.")
@@ -79,14 +87,17 @@ class Client:
         if not self.db_client.server_info():
             raise ConnectionError("Could not connect to the MongoDB server.");
 
-        self.database = self.db_client.get_database()
+        self._database = self.db_client.get_database()
 
         # Check if the 'credentials' exists in the database
-        if not 'credentials' in self.database.list_collection_names():
+        if not 'credentials' in self._database.list_collection_names():
             raise ConnectionError("The 'credentials' collection could not be found in the database.")
 
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.db_client.close()
+
     @sleep_and_retry
-    @limits(calls=FORTNOX_MAX_CALLS_PER_MINUTE, period=ONE_MINUTE_IN_SECONDS)
+    @limits(calls=FORTNOX_MAX_REQUESTS_PER_PERIOD, period=FORTNOX_INTERVAL_OF_MAX_REQUESTS_IN_SECONDS)
     def __request(
         self,
         url,
@@ -100,22 +111,33 @@ class Client:
             access_token = self.__get_access_token()
         if params:
             url += f"?{parse.urlencode(params)}"
+        headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                }
         # TODO: Make sure the data is in a FortnoxPayload, i.e. { 'Invoice': {...} }
         response = requests.request(
             method,
             url,
             data=data,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             timeout=self.request_timeout,
         )
+        # We should always rais TooManyRequests exception for rate limit wrapper
+        if response.status_code == 429:
+                print(f"Too many requests, potentially skipped call to: {url}")
+                return response.raise_for_status()
+                # Don't do this: Infinite loop, prolly
+                #response = requests.request(method, url, data=data, headers=headers, timeout=self.request_timeout, raise_exception=False)
+                #status_code = response.status_code
         if raise_exception is True:
             status_code = response.status_code
             try:
                 match method:
                     case "GET":
+                        if status_code != 200:
+                            response.raise_for_status()
+                    case "PUT":
                         if status_code != 200:
                             response.raise_for_status()
                     case "POST":
@@ -124,33 +146,42 @@ class Client:
                     case "DELETE":
                         if status_code != 204:
                             response.raise_for_status()
+                    case _:
+                        response.raise_for_status()
             except Exception as exc:
                 print(response.content)
-
-                raise Exception(
+                raise HTTPError(
                     f"Failed to {method} @ {url}, received unexpected status code: {status_code}"
                 ) from exc
 
         return response
 
     def __fetch_resources(
-        self, resource, resource_number=None, voucher_series=None, params=None
-    ):
+        self, resource, resource_number: int | None = None, voucher_series: str | None =None, params: Dict | None=None
+    ) -> Response:
+        """
+        2023-04-12: Breaking change, now returns Response object instead of payload
+        """
         voucher_identifier = None
 
-        def xstr(str_or_null):
+        def xstr(str_or_null: str | None) -> str:
             return str_or_null or ""
 
         if resource == "vouchers":
             if not voucher_series[0].isalpha() or not voucher_series[0].isupper():
                 raise ValueError("Invalid Series for voucher resource")
-            voucher_identifier = f"{voucher_series}/{xstr(resource_number)}"
+            if resource_number is not None:
+                if not isinstance(resource_number, int) or resource_number <= 0:
+                    raise ValueError("Invalid id for voucher: '{resource_number}', expected positive integer")
+                voucher_identifier = f"vouchers/{voucher_series}/{resource_number}"
+            else:
+                voucher_identifier = f"vouchers/sublist/{voucher_series}"
         url = (
             FORTNOX_API_URL + resource + f"/{xstr(resource_number)}"
             if not voucher_identifier
             else FORTNOX_API_URL + voucher_identifier
         )
-        return self.__request(url, "GET", params=params).json()
+        return self.__request(url, "GET", params=params)
 
     def __post_resources(
         self, resource, data, resource_number=None, voucher_series=None, params=None
@@ -253,13 +284,7 @@ class Client:
         """
         return self.__post_resources("invoices", data=json.dumps(invoice))
 
-    def update_invoice(self, invoice_number, invoice):
-        """
-        Update an existing invoice.
-        """
-        return self.__put_resources("invoices",data=json.dumps(invoice), resource_number=invoice_number)
-
-    def invoices(self, invoice_number=None, params=None):
+    def invoices(self, invoice_number=None, params=None) -> Response:
         """
         Fetch invoices with given invoice number and resource parameters.
 
@@ -272,15 +297,48 @@ class Client:
             "invoices", resource_number=invoice_number, params=params
         )
 
-    def bookkeep_invoice(self, invoice_number):
+    def bookkeep_invoice(self, invoice_number, raise_exception=False):
         """
         Bookkeep an invoice.
         """
         if not isinstance(invoice_number, int):
             raise ValueError
         return self.__request(
-            f"{FORTNOX_API_URL}invoices/{invoice_number}/bookkeep", "PUT"
+            f"{FORTNOX_API_URL}invoices/{invoice_number}/bookkeep", "PUT",
+            raise_exception=raise_exception
         )
+
+    def cancel_invoice(self, invoice_number):
+        """
+        Cancel an invoice.
+        """
+        if not isinstance(invoice_number, int):
+            raise ValueError
+        return self.__request(
+            f"{FORTNOX_API_URL}invoices/{invoice_number}/cancel", "PUT"
+        )
+
+    def create_credit_invoice(self, invoice_number):
+        """
+        Create a Credit Invoice for an existing invoice.
+        """
+        if not isinstance(invoice_number, int):
+            raise ValueError
+        return self.__request(
+            f"{FORTNOX_API_URL}invoices/{invoice_number}/credit", "PUT"
+        )
+
+    def update_invoice(self, invoice_number, invoice_data):
+        """
+        Update fields of an existing invoice.
+        """
+        if not isinstance(invoice_number, int):
+            raise ValueError
+        return self.__request(
+            f"{FORTNOX_API_URL}invoices/{invoice_number}", "PUT", data=invoice_data
+        )
+
+
 
     def invoicepayments(
         self, invoice_payment_number=None, params: ResourceParams = None
@@ -297,6 +355,15 @@ class Client:
             "invoicepayments", resource_number=invoice_payment_number, params=params
         )
 
+    def upload_invoice_payment(self, invoice_payment):
+        """
+        Uploads invoice payment.
+        NOTE: Doesn't require payload for now: { 'InvoicePayment': invoice_payment }
+        """
+        return self.__request(
+            f"{FORTNOX_API_URL}invoicepayments", "POST", data=json.dumps({'InvoicePayment':invoice_payment})
+        )
+
     def remove_invoice_payment(self, invoice_payment_number):
 
         if not isinstance(invoice_payment_number, int):
@@ -304,6 +371,19 @@ class Client:
         return self.__request(
             f"{FORTNOX_API_URL}invoicepayments/{invoice_payment_number}", "DELETE"
         )
+
+    def update_invoice_payment(self, invoice_payment_number, invoice_payment):
+        """
+        Updates existing Invoice Payment.
+        NOTE: Doesn't require payload for now: { 'InvoicePayment': invoice_payment }
+        """
+        if not isinstance(invoice_payment_number, int):
+            raise ValueError
+        return self.__request(
+            f"{FORTNOX_API_URL}invoicepayments/{invoice_payment_number}", "PUT", data=json.dumps({'InvoicePayment':invoice_payment})
+        )
+
+
 
     def vouchers(
         self, voucher_series, voucher_number=None, params: ResourceParams = None
@@ -326,8 +406,11 @@ class Client:
         )
 
     def upload_voucher(self, voucher):
+        """
+        2023-04-12: Doesn't require { "Voucher": voucher } payload object
+        """
         return self.__request(
-            f"{FORTNOX_API_URL}vouchers", "POST", data=json.dumps(dict(Voucher=voucher))
+            f"{FORTNOX_API_URL}vouchers", "POST", data=json.dumps({"Voucher": voucher})
         )
 
     def __get_access_token(self):
@@ -346,7 +429,7 @@ class Client:
             Exception: If an error occurs while retrieving the access token.
         """
 
-        credentials = self.database.credentials.find_one({"provider": "fortnox"})
+        credentials = self._database.credentials.find_one({"provider": "fortnox"})
         access_token = credentials["accessToken"]
         refresh_token = credentials["refreshToken"]
         client_identity = credentials["clientIdentity"]
@@ -391,7 +474,7 @@ class Client:
             expires_in = json_token["expires_in"]
             expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
 
-            self.database.credentials.update_one(
+            self._database.credentials.update_one(
                 {"provider": "fortnox"},
                 {
                     "$set": {

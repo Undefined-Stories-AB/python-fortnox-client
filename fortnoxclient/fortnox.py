@@ -7,8 +7,7 @@ from urllib import parse
 import json
 
 from pymongo import MongoClient, database
-from pymongo.uri_parser import parse_uri
-from ratelimit import RateLimitException, limits, sleep_and_retry
+from ratelimit import limits, sleep_and_retry
 import fire
 import requests
 from requests import Response, HTTPError
@@ -24,8 +23,8 @@ FORTNOX_TOKEN_EXPIRES_IN__SECONDS = 3600
 # Any over-usage (burst) during a period will mean that the rate limit kicks in until enough
 # time has passed to make the average 25 requests per period again.
 
-FORTNOX_MAX_REQUESTS_PER_PERIOD = 10
-FORTNOX_INTERVAL_OF_MAX_REQUESTS_IN_SECONDS = 10
+FORTNOX_MAX_REQUESTS_PER_PERIOD = 25
+FORTNOX_INTERVAL_OF_MAX_REQUESTS_IN_SECONDS = 5
 
 
 class FortnoxResourceEnum(Enum):
@@ -56,7 +55,10 @@ class ResourceParams:
     """
 
     def __init__(
-        self, limit: int = 10, page: int = 1, sortorder: FortnoxParamSortEnum = FortnoxParamSortEnum.ASCENDING
+        self,
+        limit: int = 10,
+        page: int = 1,
+        sortorder: FortnoxParamSortEnum = FortnoxParamSortEnum.ASCENDING,
     ):
         """
         Initialize the resource parameters with default limit 10, page 1, and sortorder "ascending".
@@ -92,13 +94,8 @@ class Client:
         self.request_timeout = request_timeout_in_seconds
 
         if not db_connection_string.strip():
-            raise ValueError("Required param 'db_connection_string' is defined, but it is empty or whitespace only.")
-
-        # Parse the MongoDB URI and remove the database name
-        parsed_uri = parse_uri(db_connection_string)
-        if parsed_uri["database"] != "findus":
             raise ValueError(
-                f"Invalid database in database connection string: {parsed_uri['database']}, expected: 'findus'"
+                "Required param 'db_connection_string' is defined, but it is empty or whitespace only."
             )
 
         self.db_client = MongoClient(db_connection_string)
@@ -111,13 +108,18 @@ class Client:
 
         # Check if the 'credentials' exists in the database
         if not "credentials" in self._database.list_collection_names():
-            raise ConnectionError("The 'credentials' collection could not be found in the database.")
+            raise ConnectionError(
+                "The 'credentials' collection could not be found in the database."
+            )
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.db_client.close()
 
     @sleep_and_retry
-    @limits(calls=FORTNOX_MAX_REQUESTS_PER_PERIOD, period=FORTNOX_INTERVAL_OF_MAX_REQUESTS_IN_SECONDS)
+    @limits(
+        calls=FORTNOX_MAX_REQUESTS_PER_PERIOD,
+        period=FORTNOX_INTERVAL_OF_MAX_REQUESTS_IN_SECONDS,
+    )
     def __request(
         self,
         url,
@@ -144,7 +146,7 @@ class Client:
             headers=headers,
             timeout=self.request_timeout,
         )
-        # We should always rais TooManyRequests exception for rate limit wrapper
+        # We should always raise TooManyRequests exception for rate limit wrapper
         if response.status_code == 429:
             print(f"Too many requests, potentially skipped call to: {url}")
             return response.raise_for_status()
@@ -172,7 +174,9 @@ class Client:
                         response.raise_for_status()
             except Exception as exc:
                 print(response.content)
-                raise HTTPError(f"Failed to {method} @ {url}, received unexpected status code: {status_code}") from exc
+                raise HTTPError(
+                    f"Failed to '{method}' @ {url}, received unexpected status code: {status_code}"
+                ) from exc
 
         return response
 
@@ -196,7 +200,9 @@ class Client:
                 raise ValueError("Invalid Series for voucher resource")
             if resource_number is not None:
                 if not isinstance(resource_number, int) or resource_number <= 0:
-                    raise ValueError("Invalid id for voucher: '{resource_number}', expected positive integer")
+                    raise ValueError(
+                        "Invalid id for voucher: '{resource_number}', expected positive integer"
+                    )
                 voucher_identifier = f"vouchers/{voucher_series}/{resource_number}"
             else:
                 voucher_identifier = f"vouchers/sublist/{voucher_series}"
@@ -207,7 +213,9 @@ class Client:
         )
         return self.__request(url, "GET", params=params)
 
-    def __post_resources(self, resource, data, resource_number=None, voucher_series=None, params=None):
+    def __post_resources(
+        self, resource, data, resource_number=None, voucher_series=None, params=None
+    ):
         """
         :return: JSON Payload of the created resource(s)
         """
@@ -232,7 +240,8 @@ class Client:
         :return: JSON Payload of the updated resource(s)
         """
         if resource_number is None or resource_number == "":
-            raise ValueError("Required param 'resource_number' was not provided.")
+            raise ValueError(
+                "Required param 'resource_number' was not provided.")
         url = FORTNOX_API_URL + resource + f"/{resource_number}"
         return self.__request(url, "PUT", data=data).json()
 
@@ -251,14 +260,18 @@ class Client:
         :return: JSON Payload containing requested financial year(s)
         :rtype: Dict
         """
-        return self.__fetch_resources("financialyears", resource_number=financialyear_id, params=params)
+        return self.__fetch_resources(
+            "financialyears", resource_number=financialyear_id, params=params
+        )
 
     def accounts(self, account_number=None, params=None):
         """
         :return: JSON Payload containing requested account(s)
         :rtype: Dict
         """
-        return self.__fetch_resources("accounts", resource_number=account_number, params=params)
+        return self.__fetch_resources(
+            "accounts", resource_number=account_number, params=params
+        )
 
     def create_article(
         self,
@@ -267,31 +280,65 @@ class Client:
     ):
         """
         Create and upload a new article.
+
+        :param article_number: The article number.
+        :type article_number: Any
+        :param description: The description of the article.
+        :type description: Any
+        :return: The result of uploading the article.
+        :rtype: Any
         """
-        article = dict(Article=(dict(ArticleNumber=article_number, Description=description)))
+        # Create and upload a new article.
+        article = dict(
+            Article=(dict(ArticleNumber=article_number, Description=description))
+        )
         return self.upload_article(article)
 
     def upload_article(self, article):
         """
         Upload a new article.
+
+        Args:
+            article: The article to be uploaded.
+
+        Returns:
+            The result of the POST request to the "articles" resource.
         """
         return self.__post_resources("articles", data=json.dumps(article))
 
     def upload_customer(self, customer):
         """
         Upload a new customer.
+
+        Args:
+            customer: The customer object to be uploaded.
+
+        Returns:
+            The response from the API call.
         """
         return self.__post_resources("customers", data=json.dumps(customer))
 
     def delete_customer(self, customer_number):
         """
         Delete a customer.
+
+        Args:
+            customer_number (int): The customer number to be deleted.
+
+        Returns:
+            str: The result of the delete operation.
         """
         return self.__delete_resource("customers", resource_number=customer_number)
 
     def upload_invoice(self, invoice):
         """
         Upload a new invoice.
+
+        :param invoice: The invoice data to be uploaded.
+        :type invoice: dict
+
+        :return: The response from the post request.
+        :rtype: dict
         """
         return self.__post_resources("invoices", data=json.dumps(invoice))
 
@@ -304,43 +351,80 @@ class Client:
         :return: JSON Payload containing requested invoice(s)
         :rtype: Dict
         """
-        return self.__fetch_resources("invoices", resource_number=invoice_number, params=params)
+        return self.__fetch_resources(
+            "invoices", resource_number=invoice_number, params=params
+        )
 
     def bookkeep_invoice(self, invoice_number, raise_exception=False):
         """
         Bookkeep an invoice.
+
+        :param invoice_number: An integer representing the invoice number.
+        :param raise_exception: A boolean indicating whether to raise an exception if there is an error.
+        :return: The response from the API call.
+        :raises ValueError: If the invoice_number is not an integer.
         """
         if not isinstance(invoice_number, int):
             raise ValueError
         return self.__request(
-            f"{FORTNOX_API_URL}invoices/{invoice_number}/bookkeep", "PUT", raise_exception=raise_exception
+            f"{FORTNOX_API_URL}invoices/{invoice_number}/bookkeep",
+            "PUT",
+            raise_exception=raise_exception,
         )
 
     def cancel_invoice(self, invoice_number):
         """
         Cancel an invoice.
+
+        Parameters:
+            - invoice_number (int): The number of the invoice to be cancelled.
+
+        Returns:
+            - response (Response): The response from the API request.
+
+        Raises:
+            - ValueError: If the invoice_number is not an integer.
         """
         if not isinstance(invoice_number, int):
             raise ValueError
-        return self.__request(f"{FORTNOX_API_URL}invoices/{invoice_number}/cancel", "PUT")
+        return self.__request(
+            f"{FORTNOX_API_URL}invoices/{invoice_number}/cancel", "PUT"
+        )
 
     def create_credit_invoice(self, invoice_number):
         """
         Create a Credit Invoice for an existing invoice.
+
+        :param invoice_number: The invoice number of the invoice to be credited.
+        :type invoice_number: int
+        :return: The response from the API request.
+        :rtype: Response
+        :raises ValueError: If the invoice number is not an integer.
         """
         if not isinstance(invoice_number, int):
             raise ValueError
-        return self.__request(f"{FORTNOX_API_URL}invoices/{invoice_number}/credit", "PUT")
+        return self.__request(
+            f"{FORTNOX_API_URL}invoices/{invoice_number}/credit", "PUT"
+        )
 
     def update_invoice(self, invoice_number, invoice_data):
         """
         Update fields of an existing invoice.
+
+        :param invoice_number: The invoice number to update. Must be an integer.
+        :param invoice_data: The data to update the invoice with.
+        :return: The response from the API request.
+        :raises ValueError: If the invoice number is not an integer.
         """
         if not isinstance(invoice_number, int):
             raise ValueError
-        return self.__request(f"{FORTNOX_API_URL}invoices/{invoice_number}", "PUT", data=invoice_data)
+        return self.__request(
+            f"{FORTNOX_API_URL}invoices/{invoice_number}", "PUT", data=invoice_data
+        )
 
-    def invoicepayments(self, invoice_payment_number=None, params: ResourceParams = None):
+    def invoicepayments(
+        self, invoice_payment_number=None, params: ResourceParams = None
+    ):
         """
         Fetch invoice payments with given invoice number and resource parameters.
 
@@ -349,26 +433,58 @@ class Client:
         :return: JSON Payload containing requested invoice payment(s)
         :rtype: Dict
         """
-        return self.__fetch_resources("invoicepayments", resource_number=invoice_payment_number, params=params)
+        return self.__fetch_resources(
+            "invoicepayments", resource_number=invoice_payment_number, params=params
+        )
 
     def upload_invoice_payment(self, invoice_payment):
         """
-        Uploads invoice payment.
-        NOTE: Doesn't require payload for now: { 'InvoicePayment': invoice_payment }
+        Uploads an invoice payment to the Fortnox API.
+
+        Parameters:
+            invoice_payment (dict): The invoice payment to be uploaded.
+
+        Returns:
+            dict: The response from the API.
         """
         return self.__request(
-            f"{FORTNOX_API_URL}invoicepayments", "POST", data=json.dumps({"InvoicePayment": invoice_payment})
+            f"{FORTNOX_API_URL}invoicepayments",
+            "POST",
+            data=json.dumps({"InvoicePayment": invoice_payment}),
         )
 
     def remove_invoice_payment(self, invoice_payment_number):
+        """
+        Removes an invoice payment from the system.
+
+        Parameters:
+            invoice_payment_number (int): The number of the invoice payment to be removed.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the invoice_payment_number is not an integer.
+        """
         if not isinstance(invoice_payment_number, int):
             raise ValueError
-        return self.__request(f"{FORTNOX_API_URL}invoicepayments/{invoice_payment_number}", "DELETE")
+        return self.__request(
+            f"{FORTNOX_API_URL}invoicepayments/{invoice_payment_number}", "DELETE"
+        )
 
     def update_invoice_payment(self, invoice_payment_number, invoice_payment):
         """
-        Updates existing Invoice Payment.
-        NOTE: Doesn't require payload for now: { 'InvoicePayment': invoice_payment }
+        Update an existing invoice payment.
+
+        Args:
+            invoice_payment_number (int): The number of the invoice payment to update.
+            invoice_payment (dict): The updated data for the invoice payment.
+
+        Returns:
+            dict: The updated invoice payment.
+
+        Raises:
+            ValueError: If the invoice payment number is not an integer.
         """
         if not isinstance(invoice_payment_number, int):
             raise ValueError
@@ -378,7 +494,28 @@ class Client:
             data=json.dumps({"InvoicePayment": invoice_payment}),
         )
 
-    def vouchers(self, voucher_series, voucher_number=None, params: ResourceParams = None):
+    def bookkeep_invoice_payment(self, invoice_payment_number: int):
+        """
+        Bookkepps an existing invoice payment in Fortnox.
+
+        Parameters:
+            invoice_payment_number (int): The number of the invoice payment to be booked.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the invoice_payment_number is not an integer.
+        """
+        if not isinstance(invoice_payment_number, int):
+            raise ValueError
+        return self.__request(
+            f"{FORTNOX_API_URL}invoicepayments/{invoice_payment_number}/bookkeep", "PUT"
+        )
+
+    def vouchers(
+        self, voucher_series, voucher_number=None, params: ResourceParams = None
+    ):
         """
         Fetch vouchers with given voucher series and number and resource parameters.
 
@@ -398,11 +535,46 @@ class Client:
 
     def upload_voucher(self, voucher):
         """
-        2023-04-12: Doesn't require { "Voucher": voucher } payload object
-        """
-        return self.__request(f"{FORTNOX_API_URL}vouchers", "POST", data=json.dumps({"Voucher": voucher}))
+        Uploads a voucher to the Fortnox API.
 
-    def __check_token_validity(self, access_token: str):
+        Args:
+            voucher (dict): The Voucher to be uploaded.
+
+        Returns:
+            dict: The response from the Fortnox API.
+
+        Note:
+            Breaking change: 2023-04-12: This function no longer requires the payload
+            object to be wrapped in a {"Voucher": voucher} structure.
+        """
+        return self.__request(
+            f"{FORTNOX_API_URL}vouchers", "POST", data=json.dumps({"Voucher": voucher})
+        )
+
+    # TODO: This code doesn't work unless Fortnox adds a DELETE endpoint for vouchers
+    # Doesn't Exists as of 2023-10-16: https://apps.fortnox.se/apidocs#operation/remove_VouchersResource
+    def remove_voucher(self, voucher_series, voucher_number):
+        raise NotImplementedError("remove_voucher is not implemented yet")
+        if not isinstance(voucher_number, int) or voucher_number <= 0:
+            raise ValueError(
+                f"Invalid id for voucher: '{voucher_number}', expected positive integer"
+            )
+        if not isinstance(voucher_series, str) and len(voucher_series) != 1:
+            raise ValueError(
+                f"Invalid Voucher Series for voucher, expected alhabetic character"
+            )
+        return self.__request(f"{FORTNOX_API_URL}vouchers/???", "DELETE")
+
+    def check_token_validity(self, access_token: str):
+        """
+        Check the validity of the given access token by calling GET from Fortnox 'companyinformation' endpoint.
+
+        Args:
+            access_token (str): The access token to be checked.
+
+        Returns:
+            bool: True if the access token is valid, False otherwise.
+        """
         return (
             self.__request(
                 f"{FORTNOX_API_URL}companyinformation",
@@ -413,15 +585,19 @@ class Client:
             == 200
         )
 
-    def __refresh_access_token(self, client_identity: str, client_secret: str, refresh_token: str) -> str:
-        auth = base64.b64encode(f"{client_identity}:{client_secret}".encode()).decode()
+    def __refresh_access_token(
+        self, client_identity: str, client_secret: str, refresh_token: str
+    ) -> str:
+        auth = base64.b64encode(
+            f"{client_identity}:{client_secret}".encode()).decode()
         response = requests.post(
             FORTNOX_TOKEN_ENDPOINT,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Authorization": f"Basic {auth}",
             },
-            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+            data={"grant_type": "refresh_token",
+                  "refresh_token": refresh_token},
             timeout=self.request_timeout,
         )
 
@@ -454,8 +630,7 @@ class Client:
         Retrieve the access_token for Fortnox Authentication.
 
         The function will first check if the current token has expired.
-        If the token has expired, or fails in call to the 'companyinformation' endpoint.
-        The function will then use the 'refresh_token' to get a new access_token.
+        If the token has expired we use the 'refresh_token' to get a new access_token.
         If the token is valid, it returns the existing token.
 
         Returns:
@@ -465,26 +640,20 @@ class Client:
             Exception: If an error occurs while retrieving the access token.
         """
 
-        credentials = self._database.credentials.find_one({"provider": "fortnox"})
+        credentials = self._database.credentials.find_one(
+            {"provider": "fortnox"})
         access_token = credentials.get("accessToken")
         refresh_token = credentials.get("refreshToken")
         client_identity = credentials.get("clientIdentity")
         client_secret = credentials.get("clientSecret")
         expires_at = credentials.get("expiresAt")
 
-        try:
-            if access_token is None or datetime.utcnow() > expires_at:
-                access_token = self.__refresh_access_token(
-                    client_identity,
-                    client_secret,
-                    refresh_token,
-                )
-        except HTTPError as http_error:
-            if http_error.response.status_code == 400:
-                access_token = self.__refresh_access_token(client_identity, client_secret, refresh_token)
-            else:
-                raise http_error
-
+        if access_token is None or datetime.utcnow() > expires_at:
+            access_token = self.__refresh_access_token(
+                client_identity,
+                client_secret,
+                refresh_token,
+            )
         return access_token
 
 

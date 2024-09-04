@@ -21,3 +21,10 @@ nosetests.xml
 coverage.xml
 
 .env
+
+# Log files
+logs**/*.txt
+/*.txt
+/*.csv
+/*.log
+/*.json

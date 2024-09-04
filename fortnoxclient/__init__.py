@@ -1,3 +1,1 @@
 from .fortnox import Client
-
-
